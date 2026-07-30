@@ -1,5 +1,9 @@
-config.yaml
+.env
 .venv/
+venv/
 __pycache__/
 data/
 runs/
+zipformer_bn/
+*.pt
+

@@ -1,0 +1,74 @@
+# Shared config for prepare_data.py / train.py / eval.py.
+# NOTE: this file can hold API keys (wandb.wandb_api_key) - keep it out of
+# version control if you put a real one here; prefer .env for MDC_API_KEY.
+
+# Data download + manifest generation - copied unchanged from the sibling
+# asr-training-pipeline (NeMo/FastConformer) repo. output_dir points at that
+# repo's data/ directory by absolute path, so the already-downloaded/extracted
+# Common Voice corpus (and any OpenSLR shards) is reused in place rather than
+# duplicated on disk. Only run `python prepare_data.py` here if you want this
+# repo to (re)build its own manifests independently of the other repo.
+data:
+  output_dir: /home/synesis/Desktop/asr-training-pipeline/data
+  workers: 8
+  skip_download: false
+  sources:
+    - type: mcv
+      name: mcv
+      dataset_id: cmqim44fo00tinr07mbu70eg7
+      splits: [train, dev, test]
+    - type: openslr
+      name: openslr
+      shards: all          # or a list of hex digits, e.g. ["0", "1", "2"], to only pull a subset
+      dev_utterances: 500
+      test_utterances: 500
+
+# Manifests/tokenizer paths read by train.py/eval.py. train_manifest/val_manifest
+# point at the merged manifests the `data:` section above produces.
+manifests:
+  train_manifest: /home/synesis/Desktop/asr-training-pipeline/data/train_manifest.json
+  val_manifest: /home/synesis/Desktop/asr-training-pipeline/data/dev_manifest.json
+  output_dir: zipformer_bn
+  tokenizer_vocab_size: 1024
+  tokenizer_model_type: bpe   # bpe | unigram | char | word
+
+model:
+  d_model: 512
+  n_layers: 17
+  n_heads: 8
+  attn_head_dim: 24      # per-head dim for the shared attention-weights computation (small by design)
+  nla_hidden_dim: 192    # hidden dim for the non-linear attention module
+  conv_kernel_size: 9
+  ff_expansion_factor: 4
+  dropout: 0.1
+  bypass_min_scale: 0.4  # lower clamp on the learnable per-channel bypass scale
+
+train:
+  loss: ctc # ctc | rnnt
+  epochs: 50
+  batch_size: 4
+  num_workers: 4
+  lr: 3.0e-4
+  weight_decay: 1.0e-3
+  warmup_steps: 1000
+  grad_clip: 5.0
+  log_interval: 50
+  transcribe_interval: 500
+  resume_from: null
+  device: cuda # cuda | cpu
+  precision: bf16 # fp32 | fp16 | bf16
+
+wandb:
+  wandb_enabled: false
+  wandb_api_key: null # wandb API key; falls back to `wandb login` / WANDB_API_KEY if unset
+  wandb_project: zipformer-training-pipeline
+  wandb_entity: null # defaults to your wandb default entity
+  wandb_run_name: null # defaults to a wandb-generated name
+
+eval:
+  model_path: null # defaults to manifests.output_dir/best.pt
+  manifest: /home/synesis/Desktop/asr-training-pipeline/data/test_manifest.json
+  batch_size: 16
+  num_workers: 4
+  device: cuda
+  out: null
