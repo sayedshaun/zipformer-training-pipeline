@@ -1,0 +1,11 @@
+torch
+torchaudio
+pandas
+requests
+soundfile
+pydub
+tqdm
+pyyaml
+python-dotenv
+wandb
+sentencepiece
