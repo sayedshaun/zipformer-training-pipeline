@@ -2,14 +2,18 @@
 # NOTE: this file can hold API keys (wandb.wandb_api_key) - keep it out of
 # version control if you put a real one here; prefer .env for MDC_API_KEY.
 
-# Data download + manifest generation - copied unchanged from the sibling
-# asr-training-pipeline (NeMo/FastConformer) repo. output_dir points at that
-# repo's data/ directory by absolute path, so the already-downloaded/extracted
-# Common Voice corpus (and any OpenSLR shards) is reused in place rather than
-# duplicated on disk. Only run `python prepare_data.py` here if you want this
-# repo to (re)build its own manifests independently of the other repo.
+# Data download + manifest generation - the source modules are copied unchanged
+# from the sibling asr-training-pipeline (NeMo/FastConformer) repo, but the paths
+# below are this repo's own. They are relative to the directory you run the
+# scripts from (the repo root), so the config stays valid when the repo moves
+# between machines - keep them relative unless you are deliberately pointing at
+# a corpus stored elsewhere, in which case use an absolute path.
+#
+# `data/` is gitignored. Run `python prepare_data.py` to populate it. If you
+# already have an extracted corpus somewhere else, point output_dir at that
+# directory and set skip_download: true rather than re-downloading it.
 data:
-  output_dir: /home/synesis/Desktop/asr-training-pipeline/data
+  output_dir: data
   workers: 8
   skip_download: false
   sources:
@@ -24,10 +28,11 @@ data:
       test_utterances: 500
 
 # Manifests/tokenizer paths read by train.py/eval.py. train_manifest/val_manifest
-# point at the merged manifests the `data:` section above produces.
+# point at the merged manifests the `data:` section above produces, so they must
+# stay in sync with data.output_dir.
 manifests:
-  train_manifest: /home/synesis/Desktop/asr-training-pipeline/data/train_manifest.json
-  val_manifest: /home/synesis/Desktop/asr-training-pipeline/data/dev_manifest.json
+  train_manifest: data/train_manifest.json
+  val_manifest: data/dev_manifest.json
   output_dir: zipformer_bn
   tokenizer_vocab_size: 1024
   tokenizer_model_type: bpe   # bpe | unigram | char | word
@@ -67,7 +72,7 @@ wandb:
 
 eval:
   model_path: null # defaults to manifests.output_dir/best.pt
-  manifest: /home/synesis/Desktop/asr-training-pipeline/data/test_manifest.json
+  manifest: data/test_manifest.json
   batch_size: 16
   num_workers: 4
   device: cuda
