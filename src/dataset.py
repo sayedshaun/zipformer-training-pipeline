@@ -1,7 +1,7 @@
-"""Pure-PyTorch dataset for the from-scratch FastConformer: reads the same
-{audio_filepath, text, duration} manifests prepare_data.py produces. Tokenizer
-is injected (see tokenizer.py) - anything with encode()/decode()/vocab_size
-works.
+"""Pure-PyTorch dataset for the from-scratch Zipformer in src/model.py: reads
+the {audio_filepath, text, duration} manifests prepare_data.py produces.
+Tokenizer is injected (see tokenizer.py) - anything with
+encode()/decode()/vocab_size works.
 """
 
 import json

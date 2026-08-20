@@ -11,7 +11,7 @@ clone-and-run-scripts recipe collection rather than a library. Rather than
 taking on that dependency stack, this repo follows the same approach the
 sibling [`conformer-training-pipeline`](../conformer-training-pipeline) repo
 took for FastConformer: **the model is implemented from scratch in
-[`model.py`](model.py)**, module by module. See [`ARCHITECTURE.md`](ARCHITECTURE.md)
+[`src/model.py`](src/model.py)**, module by module. See [`ARCHITECTURE.md`](ARCHITECTURE.md)
 for the full reference this follows and what's simplified vs. the paper
 (single-stack encoder, not the full U-Net multi-rate stack).
 
@@ -22,13 +22,13 @@ for the full reference this follows and what's simplified vs. the paper
   from [`asr-training-pipeline`](../asr-training-pipeline) — the manifest
   format (`{"audio_filepath", "text", "duration"}` JSON-lines) and the
   mcv/openslr sources are architecture-agnostic.
-- `config.yaml`'s `data.output_dir` points at that repo's `data/` directory
-  by **absolute path**, and `manifests.train_manifest`/`val_manifest` point
-  at the manifests it already produces there — so this repo reuses the
-  already-downloaded/extracted Common Voice (and OpenSLR, once pulled) data
-  in place instead of duplicating ~14GB+ on disk. Run `prepare_data.py` here
-  only if you want this repo to (re)build manifests independently.
-- `model.py`/`dataset.py`/`tokenizer.py`/`train.py`/`eval.py` mirror
+- Only the data-prep *code* is shared; the paths are this repo's own.
+  `config.yaml` writes to a repo-local, gitignored `data/` directory, so a
+  fresh clone is self-contained. If you already have the Common Voice /
+  OpenSLR corpus extracted somewhere else and would rather not duplicate
+  ~14GB+ on disk, point `data.output_dir` at that directory and set
+  `data.skip_download: true`.
+- `src/model.py`/`src/dataset.py`/`tokenizer.py`/`train.py`/`eval.py` mirror
   `conformer-training-pipeline`'s from-scratch style and CLI conventions —
   only the encoder internals differ (see `ARCHITECTURE.md`).
 
@@ -49,6 +49,12 @@ pip install -r requirements.txt
 ```
 
 An NVIDIA GPU is assumed for training/evaluation (`train.device`/`eval.device: cuda`).
+
+Paths in `config.yaml` (`data.output_dir`, `manifests.train_manifest`/
+`val_manifest`, `manifests.output_dir`, `eval.manifest`) are **relative to the
+directory you run from**, so run the scripts from the repo root. Nothing exists
+under `data/` until you run `prepare_data.py`; `train.py`/`eval.py` check these
+paths up front and name the offending config key if one is missing.
 
 ## Configuration
 
@@ -84,18 +90,18 @@ suggested build order, before attempting RNNT.
 
 ```
 config.yaml            Single source of truth for all pipeline settings
-ARCHITECTURE.md         Zipformer architectural reference (BiasNorm, shared
-                        attention weights, non-linear attention, Swoosh, bypass)
-prepare_data.py         CLI: runs each configured data source, merges manifests
-model.py                Zipformer, built from scratch (see ARCHITECTURE.md)
-dataset.py              Manifest-backed PyTorch Dataset/DataLoader
-tokenizer.py            SentencePiece BPE tokenizer
-train.py                CLI: model training (CTC/RNNT)
-eval.py                 CLI: WER/CER evaluation
+ARCHITECTURE.md        Zipformer architectural reference (BiasNorm, shared
+                       attention weights, non-linear attention, Swoosh, bypass)
+prepare_data.py        CLI: runs each configured data source, merges manifests
+tokenizer.py           SentencePiece BPE tokenizer
+train.py               CLI: model training (CTC/RNNT)
+eval.py                CLI: WER/CER evaluation
 src/
-  config.py             YAML config-section loader
-  mcv.py                 Common Voice / Mozilla Data Collective source
-  openslr.py             OpenSLR-53 Bengali corpus source
-  download.py             Shared resumable-download helper
-  audio.py                Shared clip-to-16kHz-mono-WAV conversion helper
+  model.py             Zipformer, built from scratch (see ARCHITECTURE.md)
+  dataset.py           Manifest-backed PyTorch Dataset/DataLoader
+  config.py            YAML config-section loader
+  mcv.py               Common Voice / Mozilla Data Collective source
+  openslr.py           OpenSLR-53 Bengali corpus source
+  download.py          Shared resumable-download helper
+  audio.py             Shared clip-to-16kHz-mono-WAV conversion helper
 ```

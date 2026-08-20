@@ -1,5 +1,5 @@
-"""Training loop for the from-scratch Zipformer (model.py) on manifests
-produced by prepare_data.py, using the tokenizer/dataloader in dataset.py.
+"""Training loop for the from-scratch Zipformer (src/model.py) on manifests
+produced by prepare_data.py, using tokenizer.py and src/dataset.py.
 
 Supports CTC (default, recommended per ARCHITECTURE.md build order) and, once
 CTC training converges, RNNT via --loss rnnt.
