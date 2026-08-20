@@ -17,7 +17,12 @@ class ManifestDataset(Dataset):
         self.entries = []
         with open(manifest_path) as f:
             for line in f:
-                self.entries.append(json.loads(line))
+                # Manifests are concatenated from per-source parts; tolerate a
+                # stray blank line rather than dying on json.loads("").
+                if line.strip():
+                    self.entries.append(json.loads(line))
+        if not self.entries:
+            raise ValueError(f"{manifest_path} contains no utterances")
         self.tokenizer = tokenizer
         self.sample_rate = sample_rate
 

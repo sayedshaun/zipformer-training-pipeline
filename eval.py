@@ -84,7 +84,7 @@ def main():
     )
 
     with open(args.manifest) as f:
-        references = [json.loads(line)["text"] for line in f]
+        references = [json.loads(line)["text"] for line in f if line.strip()]
 
     model = ZipformerFromScratch(
         vocab_size=tokenizer.vocab_size,

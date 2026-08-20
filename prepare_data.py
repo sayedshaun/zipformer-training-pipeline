@@ -38,7 +38,13 @@ def merge_manifests(output_dir: Path, source_names: list) -> None:
         with open(output_dir / f"{split}_manifest.json", "w") as out:
             for part_path in part_paths:
                 with open(part_path) as f:
-                    out.write(f.read())
+                    part = f.read()
+                # Guarantee the separator between parts: without it a part file
+                # missing its trailing newline would splice its last JSON object
+                # onto the next part's first one.
+                if part and not part.endswith("\n"):
+                    part += "\n"
+                out.write(part)
 
 
 def main():
