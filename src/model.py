@@ -498,6 +498,10 @@ class ZipformerEncoder(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+        # ARCHITECTURE.md section 7: the stack ends in a BiasNorm before the
+        # heads. Each block's own final_norm sits *before* its bypass, so the
+        # encoder output would otherwise have an unconstrained scale.
+        self.final_norm = BiasNorm(d_model)
         self.d_model = d_model
 
     def forward(self, features: torch.Tensor, feature_lengths: torch.Tensor):
@@ -508,7 +512,7 @@ class ZipformerEncoder(nn.Module):
         padding_mask = lengths_to_padding_mask(lengths, x.size(1))
         for block in self.blocks:
             x = block(x, pos_emb, padding_mask)
-        return x, lengths
+        return self.final_norm(x), lengths
 
 
 class CTCHead(nn.Module):
