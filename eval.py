@@ -96,7 +96,17 @@ def main():
     ).to(device)
 
     ckpt = torch.load(model_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    # The RNNT branch is built only when training with `loss: rnnt`, and eval
+    # decodes via CTC either way - so drop those keys and then load *strictly*,
+    # so a config that no longer matches the checkpoint (wrong d_model,
+    # n_layers, vocab size, ...) fails loudly instead of silently evaluating a
+    # partly-randomly-initialised model.
+    state_dict = {
+        key: value
+        for key, value in ckpt["model_state_dict"].items()
+        if not key.startswith(("prediction_network.", "joint_network."))
+    }
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     hypotheses = []
