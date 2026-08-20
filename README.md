@@ -1,8 +1,9 @@
 # Zipformer Training Pipeline
 
-Train a Zipformer (Yao et al., ICLR 2024) speech recognition model from
-scratch on Bengali, end to end: build manifests from Common Voice + OpenSLR
-data, train a tokenizer, train the model (CTC or RNNT), and evaluate it.
+Train a Zipformer ([Yao et al., ICLR 2024](https://arxiv.org/abs/2310.11230))
+speech recognition model from scratch on Bengali, end to end: build manifests
+from Common Voice + OpenSLR data, train a tokenizer, train the model (CTC or
+RNNT), and evaluate it.
 
 There is no NeMo/HuggingFace-style pip-installable Zipformer — the reference
 implementation ([k2-fsa/icefall](https://github.com/k2-fsa/icefall)) needs
@@ -105,3 +106,30 @@ src/
   download.py          Shared resumable-download helper
   audio.py             Shared clip-to-16kHz-mono-WAV conversion helper
 ```
+
+## Reference
+
+The architecture implemented here follows:
+
+> Zengwei Yao, Liyong Guo, Xiaoyu Yang, Wei Kang, Fangjun Kuang, Yifan Yang,
+> Zengrui Jin, Long Lin, Daniel Povey.
+> **Zipformer: A faster and better encoder for automatic speech recognition.**
+> *International Conference on Learning Representations (ICLR), 2024.*
+> [arXiv:2310.11230](https://arxiv.org/abs/2310.11230) ·
+> [PDF](https://www.danielpovey.com/files/2024_iclr_zipformer.pdf) ·
+> [reference implementation (k2-fsa/icefall)](https://github.com/k2-fsa/icefall)
+
+```bibtex
+@inproceedings{yao2024zipformer,
+  title     = {Zipformer: A faster and better encoder for automatic speech recognition},
+  author    = {Yao, Zengwei and Guo, Liyong and Yang, Xiaoyu and Kang, Wei and
+               Kuang, Fangjun and Yang, Yifan and Jin, Zengrui and Lin, Long and
+               Povey, Daniel},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2024},
+  url       = {https://arxiv.org/abs/2310.11230}
+}
+```
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a module-by-module breakdown of
+what this repo takes from the paper and what it simplifies.
