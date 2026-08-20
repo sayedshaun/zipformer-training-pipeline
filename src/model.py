@@ -382,6 +382,14 @@ class ConvolutionModule(nn.Module):
 
         x = self.pointwise_conv1(x)
         x = self.glu(x)
+
+        if padding_mask is not None:
+            # pointwise_conv1 has a bias, so the zeroed padding columns above are
+            # non-zero again by now. Re-zero them before the depthwise conv, whose
+            # kernel_size // 2 receptive field would otherwise pull that padding
+            # into the last few *valid* frames.
+            x = x.masked_fill(padding_mask.unsqueeze(1), 0.0)
+
         x = self.depthwise_conv(x)
         x = self.mid_norm(x.transpose(1, 2)).transpose(1, 2)
         x = swoosh_l(x)
