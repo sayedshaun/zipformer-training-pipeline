@@ -6,9 +6,12 @@ import yaml
 
 # PyYAML's default SafeLoader fails to recognize exponential notation without
 # a decimal point (e.g. "1e-5") as a float and silently leaves it as a string.
-# Patch in the fuller float resolver so values like config.yaml's `lr: 1e-5`
-# still load as floats.
-_FLOAT_LOADER = yaml.SafeLoader
+# Patch the fuller float resolver into a *subclass* so values like config.yaml's
+# `lr: 1e-5` load as floats without changing yaml.safe_load for the whole process.
+class _FLOAT_LOADER(yaml.SafeLoader):
+    pass
+
+
 _FLOAT_LOADER.add_implicit_resolver(
     "tag:yaml.org,2002:float",
     re.compile(
