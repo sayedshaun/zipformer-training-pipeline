@@ -173,7 +173,6 @@ class RelPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
         self.d_model = d_model
-        self.xscale = math.sqrt(d_model)
         self.max_len = 0
         self.register_buffer("pe", torch.empty(0), persistent=False)
         self._build_pe(max_len, torch.device("cpu"), torch.float32)
@@ -193,7 +192,13 @@ class RelPositionalEncoding(nn.Module):
         self.max_len = max_len
 
     def forward(self, x: torch.Tensor):
-        """x: (B, T, d_model). Returns (x * xscale, pos_emb) where pos_emb has shape (1, 2T-1, d_model)."""
+        """x: (B, T, d_model). Returns (x, pos_emb) where pos_emb has shape (1, 2T-1, d_model).
+
+        x is passed through untouched: unlike absolute positional encoding, the
+        embedding is never added to x (AttentionWeights projects `pos_emb`
+        separately), so there is nothing for a sqrt(d_model) input scale to pair
+        with - it would only inflate the first block's residual branch.
+        """
         t = x.size(1)
         # Grown lazily rather than at construction, so a longer-than-expected
         # utterance rebuilds `pe` on x's device instead of leaving it on the CPU.
@@ -201,7 +206,7 @@ class RelPositionalEncoding(nn.Module):
             self._build_pe(max(t, self.max_len), x.device, self.pe.dtype)
         center = self.max_len - 1
         pos_emb = self.pe[:, center - (t - 1) : center + t]
-        return x * self.xscale, pos_emb
+        return x, pos_emb
 
 
 class BiasNorm(nn.Module):
