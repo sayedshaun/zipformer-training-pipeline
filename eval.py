@@ -16,7 +16,7 @@ from pathlib import Path
 
 import torch
 
-from src.config import load_sections
+from src.config import load_sections, require_existing_paths
 from src.dataset import build_dataloader
 from src.model import ZipformerFromScratch
 from tokenizer import BPETokenizer
@@ -73,6 +73,10 @@ def main():
     output_dir = Path(manifests_args.output_dir)
     model_path = args.model_path or output_dir / "best.pt"
     vocab_path = output_dir / "tokenizer.model"
+
+    require_existing_paths(
+        cli_args.config, manifest=args.manifest, model_path=model_path, tokenizer=vocab_path,
+    )
 
     tokenizer = BPETokenizer.load(str(vocab_path))
     loader = build_dataloader(

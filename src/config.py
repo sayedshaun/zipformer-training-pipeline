@@ -1,6 +1,7 @@
 """Loads a section of config.yaml into a Namespace."""
 import re
 from argparse import Namespace
+from pathlib import Path
 
 import yaml
 
@@ -41,6 +42,19 @@ def load_section(config_path: str, section: str, required: list = ()) -> Namespa
         )
 
     return Namespace(**section_cfg)
+
+
+def require_existing_paths(config_path: str, **paths) -> None:
+    """Fails fast with the offending config key when a configured input path is
+    missing - config.yaml holds absolute paths into a sibling repo, so a config
+    copied between machines otherwise dies much later with a bare FileNotFoundError."""
+    missing = [f"{key}: {value}" for key, value in paths.items() if not Path(value).exists()]
+    if missing:
+        raise SystemExit(
+            "Configured path(s) do not exist:\n  "
+            + "\n  ".join(missing)
+            + f"\nFix them in {config_path} (or run prepare_data.py to build the manifests)."
+        )
 
 
 def load_sections(config_path: str, *sections: str) -> Namespace:

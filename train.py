@@ -23,7 +23,7 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
-from src.config import load_sections
+from src.config import load_sections, require_existing_paths
 from src.dataset import build_dataloader
 from src.model import ZipformerFromScratch
 from tokenizer import BPETokenizer
@@ -164,6 +164,12 @@ def main():
     cli_args = build_arg_parser().parse_args()
     args = load_sections(cli_args.config, "manifests", "model", "train")
     wandb_args = load_sections(cli_args.config, "wandb")
+
+    require_existing_paths(
+        cli_args.config,
+        train_manifest=args.train_manifest,
+        val_manifest=args.val_manifest,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
