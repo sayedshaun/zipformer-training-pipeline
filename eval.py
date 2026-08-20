@@ -17,8 +17,8 @@ from pathlib import Path
 import torch
 
 from src.config import load_sections
-from dataset import build_dataloader
-from model import ZipformerFromScratch
+from src.dataset import build_dataloader
+from src.model import ZipformerFromScratch
 from tokenizer import BPETokenizer
 
 
