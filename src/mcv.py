@@ -40,7 +40,10 @@ def find_corpus_root(path: Path):
 
 def extract_dataset(archive_path: Path, dest: Path) -> Path:
     with tarfile.open(archive_path) as tar:
-        tar.extractall(dest)
+        # filter="data" rejects members that would escape `dest` via absolute or
+        # ../ paths; it also becomes the default in Python 3.14, so setting it
+        # explicitly keeps behaviour identical across versions.
+        tar.extractall(dest, filter="data")
     subdirs = [p for p in dest.iterdir() if p.is_dir()]
     top = subdirs[0] if len(subdirs) == 1 else dest
     corpus_dir = find_corpus_root(top)
