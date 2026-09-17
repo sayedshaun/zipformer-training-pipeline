@@ -98,6 +98,11 @@ class LogMelFeatureExtractor(nn.Module):
             win_length=self.win_length,
             window=self.window,
             center=True,
+            # Default "reflect" padding mirrors the signal at the utterance edge,
+            # so an utterance's final frames depend on whether it was batched
+            # with longer ones. That frame is a key in self-attention, so the
+            # discrepancy spreads to every output frame, not just the boundary.
+            pad_mode="constant",
             return_complex=True,
         )
         power_spectrum = stft.abs() ** 2  # (B, n_freq_bins, T_frames)
@@ -112,6 +117,12 @@ class LogMelFeatureExtractor(nn.Module):
             stride=self.hop_length,
             padding=self.n_fft // 2,
         )
+
+        # Frames past an utterance's length hold log(log_eps), a large negative
+        # constant, and nothing masks them before ConvSubsampling - whose kernel
+        # would pull that into the last valid frames. Zero them instead.
+        padding_mask = lengths_to_padding_mask(feature_lengths, features.size(1))
+        features = features.masked_fill(padding_mask.unsqueeze(-1), 0.0)
         return features, feature_lengths
 
 
@@ -149,20 +160,35 @@ class ConvSubsampling(nn.Module):
             freq_out = (freq_out + 2 * self.padding - kernel_size) // self.stride + 1
         self.out_proj = nn.Linear(d_model * freq_out, d_model)
 
+    def _mask_padding(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """Zero time frames past `lengths`. x: (B, C, T, F)."""
+        mask = lengths_to_padding_mask(lengths, x.size(2))
+        return x.masked_fill(mask.unsqueeze(1).unsqueeze(-1), 0.0)
+
     def forward(self, features: torch.Tensor, feature_lengths: torch.Tensor):
         x = features.unsqueeze(1)  # (B, 1, T, n_mels)
+
+        # Re-zero the padded frames after every stage, not just on the way in:
+        # each conv has a bias, so frames zeroed before it come out holding that
+        # bias, and the next conv's kernel would mix that batch-shape-dependent
+        # value back into the last valid frames.
+        lengths = feature_lengths
         x = self.first_activation(self.first_conv(x))
+        lengths = conv_out_length(lengths, self.kernel_size, self.stride, self.padding)
+        x = self._mask_padding(x, lengths)
+
         x = self.dw_conv1(x)
+        lengths = conv_out_length(lengths, self.kernel_size, self.stride, self.padding)
+        x = self._mask_padding(x, lengths)
+
         x = self.dw_conv2(x)  # (B, d_model, T // 8, n_mels // 8)
+        lengths = conv_out_length(lengths, self.kernel_size, self.stride, self.padding)
+        x = self._mask_padding(x, lengths)
 
         b, c, t, f = x.shape
         x = x.permute(0, 2, 1, 3).reshape(b, t, c * f)
         x = self.out_proj(x)  # (B, T // 8, d_model)
-
-        out_lengths = feature_lengths
-        for _ in range(3):
-            out_lengths = conv_out_length(out_lengths, self.kernel_size, self.stride, self.padding)
-        return x, out_lengths
+        return x, lengths
 
 
 class RelPositionalEncoding(nn.Module):
