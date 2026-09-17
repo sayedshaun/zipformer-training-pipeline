@@ -7,9 +7,10 @@ encode()/decode()/vocab_size works.
 import json
 
 import soundfile as sf
+import soxr
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 
 class ManifestDataset(Dataset):
@@ -32,12 +33,17 @@ class ManifestDataset(Dataset):
     def __getitem__(self, idx: int):
         entry = self.entries[idx]
         waveform, sr = sf.read(entry["audio_filepath"], dtype="float32")
-        if sr != self.sample_rate:
-            raise ValueError(
-                f"{entry['audio_filepath']}: expected {self.sample_rate}Hz, got {sr}Hz"
-            )
         if waveform.ndim > 1:
             waveform = waveform.mean(axis=1)
+
+        if sr != self.sample_rate:
+            # Common Voice ships 32kHz MP3 and the corpus is mounted read-only on
+            # Kaggle, so there is nowhere to write a resampled copy - resample per
+            # item instead of pre-converting the way src/audio.py does.
+            # soxr rather than torchaudio: torchaudio is frozen at 2.11 and has no
+            # build for newer torch, so depending on it here would pin the repo's
+            # torch version for what is a few lines of signal processing.
+            waveform = soxr.resample(waveform, sr, self.sample_rate)
 
         waveform = torch.from_numpy(waveform)
         target = torch.tensor(self.tokenizer.encode(entry["text"]), dtype=torch.long)
@@ -61,12 +67,26 @@ def build_dataloader(
     shuffle: bool,
     num_workers: int = 4,
     sample_rate: int = 16000,
+    distributed: bool = False,
 ) -> DataLoader:
+    """`distributed` shards the manifest across ranks with a DistributedSampler.
+    The caller owns the returned loader's `.sampler` and must call
+    `sampler.set_epoch(epoch)` each epoch, or every rank reshuffles identically
+    and each epoch sees the same rank->utterance assignment."""
     dataset = ManifestDataset(manifest_path, tokenizer, sample_rate)
+
+    sampler = None
+    if distributed:
+        sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=False)
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        # Sampler and shuffle are mutually exclusive; the sampler does the shuffling.
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
     )

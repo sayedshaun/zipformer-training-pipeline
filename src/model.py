@@ -617,6 +617,18 @@ class ZipformerFromScratch(nn.Module):
             self.prediction_network = RNNTPredictionNetwork(vocab_size, pred_dim)
             self.joint_network = RNNTJoint(d_model, pred_dim, joint_dim, vocab_size)
 
+    def forward(self, waveform: torch.Tensor, waveform_lengths: torch.Tensor, targets: torch.Tensor = None):
+        """Dispatches to forward_rnnt when `targets` is given, else forward_ctc.
+
+        DistributedDataParallel only installs its gradient-sync hooks around
+        `forward()`, so distributed training must call the module itself
+        (`model(...)`) rather than `model.forward_ctc(...)` - the latter bypasses
+        the wrapper and silently trains each rank on its own gradients.
+        """
+        if targets is not None:
+            return self.forward_rnnt(waveform, waveform_lengths, targets)
+        return self.forward_ctc(waveform, waveform_lengths)
+
     def encode(self, waveform: torch.Tensor, waveform_lengths: torch.Tensor):
         """waveform: (B, T_samples). Returns (encoder_out (B, T', d_model), out_lengths)."""
         features, feature_lengths = self.feature_extractor(waveform, waveform_lengths)

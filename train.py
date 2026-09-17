@@ -14,12 +14,15 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import time
 from itertools import groupby
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
@@ -27,6 +30,27 @@ from src.config import load_sections, require_existing_paths
 from src.dataset import build_dataloader
 from src.model import ZipformerFromScratch
 from tokenizer import BPETokenizer
+
+
+def setup_distributed():
+    """Reads the rank/world-size torchrun injects into the environment.
+
+    Returns (is_distributed, rank, local_rank, world_size). Running the script
+    directly (no torchrun) leaves these unset and falls back to single-GPU.
+    """
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        return False, 0, 0, 1
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    # nccl is the only backend worth using for GPU collectives; gloo is the
+    # fallback for a CPU-only smoke test of the distributed path.
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    return True, rank, local_rank, world_size
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -61,6 +85,11 @@ def warmup_decay_scale(step: int, warmup_steps: int) -> float:
 AMP_DTYPES = {"fp32": None, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
+def unwrap(model):
+    """The underlying ZipformerFromScratch, whether or not DDP wrapped it."""
+    return model.module if hasattr(model, "module") else model
+
+
 def compute_loss(model, batch, loss_type: str, device, amp_dtype=None):
     waveforms, waveform_lengths, targets, target_lengths = batch
     waveforms = waveforms.to(device)
@@ -76,14 +105,15 @@ def compute_loss(model, batch, loss_type: str, device, amp_dtype=None):
 
     if loss_type == "ctc":
         with autocast_ctx:
-            log_probs, encoded_lengths = model.forward_ctc(waveforms, waveform_lengths)
+            # Call the module, not .forward_ctc - see ZipformerFromScratch.forward.
+            log_probs, encoded_lengths = model(waveforms, waveform_lengths)
         log_probs = log_probs.float().transpose(0, 1)  # CTCLoss wants (T, B, C)
         loss = torch.nn.functional.ctc_loss(
             log_probs,
             targets,
             encoded_lengths,
             target_lengths,
-            blank=model.ctc_head.blank_id,
+            blank=unwrap(model).ctc_head.blank_id,
             zero_infinity=True,
         )
         return loss
@@ -91,15 +121,13 @@ def compute_loss(model, batch, loss_type: str, device, amp_dtype=None):
     import torchaudio
 
     with autocast_ctx:
-        joint_log_probs, encoded_lengths = model.forward_rnnt(
-            waveforms, waveform_lengths, targets
-        )
+        joint_log_probs, encoded_lengths = model(waveforms, waveform_lengths, targets)
     loss = torchaudio.functional.rnnt_loss(
         joint_log_probs.float(),
         targets.int(),
         encoded_lengths.int(),
         target_lengths.int(),
-        blank=model.prediction_network.blank_id,
+        blank=unwrap(model).prediction_network.blank_id,
         fused_log_softmax=False,
     )
     return loss
@@ -112,15 +140,16 @@ def log_sample_transcription(model, batch, tokenizer, device):
     waveforms, waveform_lengths, targets, target_lengths = batch
     idx = random.randrange(waveforms.size(0))
 
+    inner = unwrap(model)
     model.eval()
     waveform = waveforms[idx : idx + 1].to(device)
     waveform_length = waveform_lengths[idx : idx + 1].to(device)
-    log_probs, encoded_lengths = model.forward_ctc(waveform, waveform_length)
+    log_probs, encoded_lengths = inner.forward_ctc(waveform, waveform_length)
     model.train()
 
     predicted_ids = log_probs[0, : encoded_lengths[0].item()].argmax(dim=-1).tolist()
     collapsed = [token for token, _ in groupby(predicted_ids)]
-    collapsed = [token for token in collapsed if token != model.ctc_head.blank_id]
+    collapsed = [token for token in collapsed if token != inner.ctc_head.blank_id]
     pred_text = tokenizer.decode(collapsed)
 
     true_ids = targets[idx][: target_lengths[idx].item()].tolist()
@@ -130,25 +159,37 @@ def log_sample_transcription(model, batch, tokenizer, device):
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, loss_type: str, device, amp_dtype=None) -> float:
+def evaluate(model, val_loader, loss_type: str, device, amp_dtype=None, is_main: bool = True) -> float:
     model.eval()
     total_loss, total_batches = 0.0, 0
-    pbar = tqdm(val_loader, desc="val", leave=False)
+    pbar = tqdm(val_loader, desc="val", leave=False, disable=not is_main)
     for batch in pbar:
         loss = compute_loss(model, batch, loss_type, device, amp_dtype)
         total_loss += loss.item()
         total_batches += 1
         pbar.set_postfix(loss=f"{total_loss / total_batches:.4f}")
     model.train()
+
+    # Each rank saw a different shard of the val set. Reduce the summed loss and
+    # batch count (not the per-rank means, which would mis-weight a short shard)
+    # so every rank computes the same number and agrees on the best checkpoint.
+    if dist.is_available() and dist.is_initialized():
+        totals = torch.tensor([total_loss, float(total_batches)], device=device, dtype=torch.float64)
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        total_loss, total_batches = totals[0].item(), int(totals[1].item())
+
     return total_loss / max(total_batches, 1)
 
 
 def save_checkpoint(
     path: Path, model, optimizer, scheduler, scaler, epoch: int, step: int, best_val_loss: float,
 ):
+    # Unwrap DDP so the checkpoint has plain keys, not "module."-prefixed ones,
+    # and stays loadable by eval.py / a single-GPU resume.
+    state_dict = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
@@ -165,6 +206,9 @@ def main():
     args = load_sections(cli_args.config, "manifests", "model", "train")
     wandb_args = load_sections(cli_args.config, "wandb")
 
+    distributed, rank, local_rank, world_size = setup_distributed()
+    is_main = rank == 0
+
     require_existing_paths(
         cli_args.config,
         train_manifest=args.train_manifest,
@@ -172,11 +216,18 @@ def main():
     )
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if is_main:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    if distributed and torch.cuda.is_available():
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if is_main:
+        print(f"World size: {world_size} | device: {device}")
 
     run = None
-    if wandb_args.wandb_enabled:
+    if is_main and wandb_args.wandb_enabled:
         import wandb
 
         if wandb_args.wandb_api_key:
@@ -189,26 +240,40 @@ def main():
             config={**vars(args), "device": str(device)},
         )
 
+    # Only rank 0 trains the tokenizer; the others wait on the barrier and load
+    # the file it wrote. Letting every rank train its own would race on the same
+    # path and risk ranks disagreeing about token ids.
     vocab_path = output_dir / "tokenizer.model"
-    if vocab_path.exists():
-        tokenizer = BPETokenizer.load(str(vocab_path))
-    else:
+    if is_main and not vocab_path.exists():
         tokenizer = BPETokenizer.build_from_manifests(
             [args.train_manifest, args.val_manifest],
             vocab_size=args.tokenizer_vocab_size,
             model_type=args.tokenizer_model_type,
         )
         tokenizer.save(str(vocab_path))
-    print(f"Vocab size: {tokenizer.vocab_size} ({vocab_path})")
+    if distributed:
+        dist.barrier()
+    tokenizer = BPETokenizer.load(str(vocab_path))
+    if is_main:
+        print(f"Vocab size: {tokenizer.vocab_size} ({vocab_path})")
 
     train_loader = build_dataloader(
-        args.train_manifest, tokenizer, args.batch_size, shuffle=True, num_workers=args.num_workers,
+        args.train_manifest, tokenizer, args.batch_size, shuffle=True,
+        num_workers=args.num_workers, distributed=distributed,
     )
     val_loader = build_dataloader(
-        args.val_manifest, tokenizer, args.batch_size, shuffle=False, num_workers=args.num_workers,
+        args.val_manifest, tokenizer, args.batch_size, shuffle=False,
+        num_workers=args.num_workers, distributed=distributed,
     )
 
     model = build_model(args, tokenizer.vocab_size).to(device)
+    if distributed:
+        model = DistributedDataParallel(
+            model,
+            device_ids=[local_rank] if torch.cuda.is_available() else None,
+        )
+    # Parameters must come from the DDP wrapper so the optimizer updates the
+    # same tensors the reducer writes gradients into.
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: warmup_decay_scale(step, args.warmup_steps)
@@ -234,7 +299,11 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         epoch_start = time.time()
         running_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"epoch {epoch}")
+        # Without set_epoch every epoch replays the same shuffle and the same
+        # rank -> utterance assignment.
+        if distributed:
+            train_loader.sampler.set_epoch(epoch)
+        pbar = tqdm(train_loader, desc=f"epoch {epoch}", disable=not is_main)
         for batch_idx, batch in enumerate(pbar):
             step += 1
 
@@ -251,40 +320,48 @@ def main():
             lr = optimizer.param_groups[0]["lr"]
             pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.2e}", step=step)
 
-            if (batch_idx + 1) % args.log_interval == 0:
+            if is_main and (batch_idx + 1) % args.log_interval == 0:
                 avg_loss = running_loss / args.log_interval
                 if run is not None:
                     run.log({"train/loss": avg_loss, "train/lr": lr, "epoch": epoch}, step=step)
                 running_loss = 0.0
 
-            if args.loss == "ctc" and step % args.transcribe_interval == 0:
+            if is_main and args.loss == "ctc" and step % args.transcribe_interval == 0:
                 log_sample_transcription(model, batch, tokenizer, device)
 
-        val_loss = evaluate(model, val_loader, args.loss, device, amp_dtype)
+        val_loss = evaluate(model, val_loader, args.loss, device, amp_dtype, is_main)
         elapsed = time.time() - epoch_start
-        print(f"epoch {epoch} done in {elapsed:.1f}s -- val_loss {val_loss:.4f}")
-        if run is not None:
-            run.log({"val/loss": val_loss, "epoch": epoch}, step=step)
+        if is_main:
+            print(f"epoch {epoch} done in {elapsed:.1f}s -- val_loss {val_loss:.4f}")
+            if run is not None:
+                run.log({"val/loss": val_loss, "epoch": epoch}, step=step)
 
-        save_checkpoint(
-            output_dir / "last.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
-        )
-        if val_loss < best_val_loss:
+        # val_loss is all-reduced, so every rank takes this branch identically -
+        # but only rank 0 writes, or the ranks would clobber each other's file.
+        is_best = val_loss < best_val_loss
+        if is_best:
             best_val_loss = val_loss
+        if is_main:
             save_checkpoint(
-                output_dir / "best.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
+                output_dir / "last.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
             )
-            print(f"New best val_loss {best_val_loss:.4f}, saved {output_dir / 'best.pt'}")
+            if is_best:
+                save_checkpoint(
+                    output_dir / "best.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
+                )
+                print(f"New best val_loss {best_val_loss:.4f}, saved {output_dir / 'best.pt'}")
 
-    with open(output_dir / "training_summary.json", "w") as f:
-        json.dump(
-            {"epochs": args.epochs, "final_step": step, "best_val_loss": best_val_loss}, f, indent=2,
-        )
+    if is_main:
+        with open(output_dir / "training_summary.json", "w") as f:
+            json.dump(
+                {"epochs": args.epochs, "final_step": step, "best_val_loss": best_val_loss}, f, indent=2,
+            )
+        print(f"All run artifacts -> {output_dir}")
+        if run is not None:
+            run.finish()
 
-    print(f"All run artifacts -> {output_dir}")
-
-    if run is not None:
-        run.finish()
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

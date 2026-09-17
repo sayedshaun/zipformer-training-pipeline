@@ -1,0 +1,13 @@
+{
+  "id": "REPLACE_WITH_YOUR_KAGGLE_USERNAME/zipformer-tiny-bn",
+  "title": "Zipformer Tiny Bengali",
+  "code_file": "kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["sajidullah03/common-voice-24-bn"],
+  "competition_sources": [],
+  "kernel_sources": []
+}

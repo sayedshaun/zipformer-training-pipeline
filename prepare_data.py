@@ -19,13 +19,19 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.commonvoice import prepare_commonvoice_dataset
 from src.config import load_section
 from src.mcv import prepare_mcv_dataset
 from src.openslr import prepare_openslr_dataset
 
 load_dotenv()
 
-PREPARERS = {"mcv": prepare_mcv_dataset, "openslr": prepare_openslr_dataset}
+PREPARERS = {
+    "mcv": prepare_mcv_dataset,
+    "openslr": prepare_openslr_dataset,
+    # An already-extracted Common Voice tree (e.g. a read-only Kaggle mount).
+    "commonvoice": prepare_commonvoice_dataset,
+}
 SPLITS = ("train", "dev", "test")
 
 
