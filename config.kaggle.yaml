@@ -52,6 +52,8 @@ train:
   weight_decay: 1.0e-3
   warmup_steps: 1000
   grad_clip: 5.0
+  # Write last.pt every N steps as well as at epoch end; 0 disables.
+  save_interval_steps: 1000
   log_interval: 50
   transcribe_interval: 500
   resume_from: null
@@ -59,7 +61,8 @@ train:
   precision: fp16
 
 wandb:
-  wandb_enabled: false
+  # The kernel overrides this via ZIPFORMER_WANDB when its secret resolves.
+  wandb_enabled: true
   wandb_api_key: null
   wandb_project: zipformer-training-pipeline
   wandb_entity: null

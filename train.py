@@ -226,8 +226,15 @@ def main():
     if is_main:
         print(f"World size: {world_size} | device: {device}")
 
+    # ZIPFORMER_WANDB lets the Kaggle kernel enable wandb only when its secret
+    # actually resolved, without writing a key into the committed config.
+    wandb_enabled = wandb_args.wandb_enabled
+    env_wandb = os.environ.get("ZIPFORMER_WANDB")
+    if env_wandb is not None:
+        wandb_enabled = env_wandb == "1"
+
     run = None
-    if is_main and wandb_args.wandb_enabled:
+    if is_main and wandb_enabled:
         import wandb
 
         if wandb_args.wandb_api_key:
@@ -326,6 +333,17 @@ def main():
                     run.log({"train/loss": avg_loss, "train/lr": lr, "epoch": epoch}, step=step)
                 running_loss = 0.0
 
+            # Epoch boundaries are hours apart on a full corpus, so without this
+            # a crash mid-epoch loses every step since the last one. Writes
+            # last.pt only - "best" is meaningless before a val pass.
+            save_interval = getattr(args, "save_interval_steps", 0)
+            if is_main and save_interval and step % save_interval == 0:
+                save_checkpoint(
+                    output_dir / "last.pt", model, optimizer, scheduler, scaler,
+                    epoch, step, best_val_loss,
+                )
+                tqdm.write(f"  [checkpoint] step {step} -> {output_dir / 'last.pt'}")
+
             if is_main and args.loss == "ctc" and step % args.transcribe_interval == 0:
                 log_sample_transcription(model, batch, tokenizer, device)
 
@@ -346,10 +364,20 @@ def main():
                 output_dir / "last.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
             )
             if is_best:
+                best_path = output_dir / "best.pt"
                 save_checkpoint(
-                    output_dir / "best.pt", model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
+                    best_path, model, optimizer, scheduler, scaler, epoch, step, best_val_loss,
                 )
-                print(f"New best val_loss {best_val_loss:.4f}, saved {output_dir / 'best.pt'}")
+                print(f"New best val_loss {best_val_loss:.4f}, saved {best_path}")
+                # Upload it so the weights are retrievable while the run is still
+                # going - the whole point on Kaggle, where /kaggle/working stays
+                # sealed until the kernel exits.
+                if run is not None:
+                    import wandb
+
+                    artifact = wandb.Artifact(f"{run.id}-checkpoint", type="model")
+                    artifact.add_file(str(best_path))
+                    run.log_artifact(artifact, aliases=["best", f"epoch-{epoch}"])
 
     if is_main:
         with open(output_dir / "training_summary.json", "w") as f:
