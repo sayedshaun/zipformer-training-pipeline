@@ -44,26 +44,27 @@ def _mel_to_hz(mel: torch.Tensor) -> torch.Tensor:
 
 
 def build_mel_filterbank(n_mels: int, n_fft: int, sample_rate: int) -> torch.Tensor:
-    """Triangular mel filterbank, shape (n_mels, n_fft // 2 + 1)."""
+    """Triangular mel filterbank, shape (n_mels, n_fft // 2 + 1).
+
+    Triangles are evaluated against each FFT bin's actual centre frequency
+    rather than against floor()'d integer bin indices. With 80 mels over the
+    201 bins of a 400-point FFT, the floor'd form collapses adjacent low
+    frequency mel points onto the same bin and leaves whole filters all-zero -
+    those channels then emit log(log_eps) for every frame of every utterance,
+    feeding the network a constant instead of a feature.
+    """
     n_freq_bins = n_fft // 2 + 1
+    fft_freqs = torch.linspace(0.0, sample_rate / 2, n_freq_bins)
+
     mel_min, mel_max = _hz_to_mel(0.0), _hz_to_mel(sample_rate / 2)
-    mel_points = torch.linspace(mel_min, mel_max, n_mels + 2)
-    hz_points = _mel_to_hz(mel_points)
-    bin_points = torch.floor((n_fft + 1) * hz_points / sample_rate).long()
+    hz_points = _mel_to_hz(torch.linspace(mel_min, mel_max, n_mels + 2))
 
     filterbank = torch.zeros(n_mels, n_freq_bins)
     for m in range(1, n_mels + 1):
-        left, center, right = (
-            bin_points[m - 1].item(),
-            bin_points[m].item(),
-            bin_points[m + 1].item(),
-        )
-        if center > left:
-            k = torch.arange(left, center)
-            filterbank[m - 1, k] = (k - left).float() / (center - left)
-        if right > center:
-            k = torch.arange(center, right)
-            filterbank[m - 1, k] = (right - k).float() / (right - center)
+        left, center, right = hz_points[m - 1], hz_points[m], hz_points[m + 1]
+        rising = (fft_freqs - left) / (center - left)
+        falling = (right - fft_freqs) / (right - center)
+        filterbank[m - 1] = torch.clamp(torch.minimum(rising, falling), min=0.0)
     return filterbank
 
 
@@ -78,8 +79,10 @@ class LogMelFeatureExtractor(nn.Module):
         win_length: int = 400,
         n_mels: int = 80,
         log_eps: float = 1e-5,
+        normalize: bool = True,
     ):
         super().__init__()
+        self.normalize = normalize
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
@@ -118,10 +121,24 @@ class LogMelFeatureExtractor(nn.Module):
             padding=self.n_fft // 2,
         )
 
-        # Frames past an utterance's length hold log(log_eps), a large negative
-        # constant, and nothing masks them before ConvSubsampling - whose kernel
-        # would pull that into the last valid frames. Zero them instead.
         padding_mask = lengths_to_padding_mask(feature_lengths, features.size(1))
+
+        if self.normalize:
+            # Per-utterance CMVN. Raw log-mel has a large negative mean (~-6)
+            # and per-channel means spread over 10+, which the first conv sees
+            # as a DC offset it has to undo; BiasNorm deliberately does not
+            # re-centre, so nothing downstream fixes it either. Statistics come
+            # from valid frames only - padding would otherwise drag the mean
+            # toward the floor value by an amount that depends on batch shape.
+            valid = (~padding_mask).unsqueeze(-1).to(features.dtype)
+            counts = valid.sum(dim=1, keepdim=True).clamp(min=1.0)
+            mean = (features * valid).sum(dim=1, keepdim=True) / counts
+            var = (((features - mean) * valid) ** 2).sum(dim=1, keepdim=True) / counts
+            features = (features - mean) / var.clamp(min=1e-10).sqrt()
+
+        # Frames past an utterance's length hold a constant that nothing masks
+        # before ConvSubsampling - whose kernel would pull it into the last
+        # valid frames. Zero them instead.
         features = features.masked_fill(padding_mask.unsqueeze(-1), 0.0)
         return features, feature_lengths
 
