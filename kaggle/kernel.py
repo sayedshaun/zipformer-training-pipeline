@@ -15,7 +15,7 @@ BRANCH = "kaggle"
 # the cloned repo would be shipped back alongside the checkpoints.
 WORKDIR = "/tmp/zipformer-training-pipeline"
 # Flip to False for the full training run.
-SMOKE = True
+SMOKE = False
 CONFIG = "config.kaggle.smoke.yaml" if SMOKE else "config.kaggle.yaml"
 
 

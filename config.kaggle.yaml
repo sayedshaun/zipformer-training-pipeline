@@ -42,7 +42,10 @@ model:
 
 train:
   loss: ctc
-  epochs: 30
+  # ~65 min/epoch at the smoke run's 1.4 s/step over 44k utterances, so 10
+  # epochs fits inside Kaggle's 12h session limit with room for val passes.
+  # Continue across sessions with resume_from rather than raising this.
+  epochs: 10
   # Per GPU. With 2 T4s under torchrun the effective batch is 2x this.
   batch_size: 8
   # Kaggle gives ~4 vCPU; MP3 decode + resample happens in these workers, so
