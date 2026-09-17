@@ -12,7 +12,9 @@ REPO = "https://github.com/sayedshaun/zipformer-training-pipeline.git"
 # The Kaggle-specific config and loader live on this branch, not on main.
 BRANCH = "kaggle"
 WORKDIR = "/kaggle/working/zipformer-training-pipeline"
-CONFIG = "config.kaggle.yaml"
+# Flip to False for the full training run.
+SMOKE = True
+CONFIG = "config.kaggle.smoke.yaml" if SMOKE else "config.kaggle.yaml"
 
 
 def run(cmd, **kwargs):
@@ -30,6 +32,8 @@ run([sys.executable, "-m", "pip", "install", "-q", "soxr"])
 # Manifests point at the read-only mount, so this writes only JSON.
 run([sys.executable, "prepare_data.py", "--config", CONFIG])
 
+CONFIG_OUT = "/kaggle/working/zipformer_tiny_smoke" if SMOKE else "/kaggle/working/zipformer_tiny"
+
 n_gpu = subprocess.run(
     ["nvidia-smi", "--list-gpus"], capture_output=True, text=True
 ).stdout.strip().count("\n") + 1
@@ -42,5 +46,5 @@ run([
 ])
 
 # /kaggle/working is what Kaggle persists as the kernel's output.
-run(["cp", "-r", "/kaggle/working/zipformer_tiny", "/kaggle/working/output_model"])
+run(["cp", "-r", CONFIG_OUT, "/kaggle/working/output_model"])
 print("\nDone. Checkpoints under /kaggle/working/output_model", flush=True)

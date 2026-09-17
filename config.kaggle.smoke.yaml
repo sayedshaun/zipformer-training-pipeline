@@ -1,0 +1,81 @@
+# Smoke-test variant of config.kaggle.yaml: a few thousand utterances and a
+# single epoch, so the first Kaggle run proves the environment (mount path,
+# MP3 decode, both T4s in use, checkpoint writing) in minutes instead of
+# discovering an environmental problem hours into a real run.
+#
+# Kaggle config: tiny Zipformer on 2x T4, Common Voice 24.0 Bengali.
+#
+# Differences from config.yaml, all forced by the Kaggle environment:
+#   - the corpus is a read-only /kaggle/input mount, so nothing is downloaded
+#     or transcoded; manifests point straight at the mounted MP3s and
+#     src/dataset.py resamples 32kHz -> 16kHz per item.
+#   - only /kaggle/working is writable (20GB), so that is where manifests,
+#     the tokenizer and checkpoints go.
+#   - precision is fp16, NOT bf16: T4 is Turing (sm_75) and has no bf16 support.
+
+data:
+  output_dir: /kaggle/working/data
+  sources:
+    - type: commonvoice
+      name: cv
+      # The mount directory is named after the Kaggle dataset slug.
+      corpus_dir: /kaggle/input/common-voice-24-bn
+      # Cap applied before the speaker split, so the sample still spans speakers.
+      max_utterances: 2000
+      dev_utterances: 200
+      test_utterances: 200
+      min_duration: 1.0
+      # Long clips dominate the padded batch cost; 20s is a generous ceiling.
+      max_duration: 20.0
+
+manifests:
+  train_manifest: /kaggle/working/data/train_manifest.json
+  val_manifest: /kaggle/working/data/dev_manifest.json
+  output_dir: /kaggle/working/zipformer_tiny_smoke
+  tokenizer_vocab_size: 1024
+  tokenizer_model_type: bpe
+
+# Tiny: ~20M params, sized to fit a T4 (16GB) at a usable batch size.
+model:
+  d_model: 256
+  n_layers: 12
+  n_heads: 4
+  attn_head_dim: 24
+  nla_hidden_dim: 192
+  conv_kernel_size: 9
+  ff_expansion_factor: 4
+  dropout: 0.1
+  bypass_min_scale: 0.4
+
+train:
+  loss: ctc
+  epochs: 1
+  # Per GPU. With 2 T4s under torchrun the effective batch is 2x this.
+  batch_size: 8
+  # Kaggle gives ~4 vCPU; MP3 decode + resample happens in these workers, so
+  # this is the setting most likely to bottleneck the GPUs.
+  num_workers: 2
+  lr: 3.0e-4
+  weight_decay: 1.0e-3
+  warmup_steps: 1000
+  grad_clip: 5.0
+  log_interval: 10
+  transcribe_interval: 50
+  resume_from: null
+  device: cuda
+  precision: fp16
+
+wandb:
+  wandb_enabled: false
+  wandb_api_key: null
+  wandb_project: zipformer-training-pipeline
+  wandb_entity: null
+  wandb_run_name: null
+
+eval:
+  model_path: null
+  manifest: /kaggle/working/data/test_manifest.json
+  batch_size: 16
+  num_workers: 2
+  device: cuda
+  out: null
