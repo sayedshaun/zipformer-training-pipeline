@@ -1,0 +1,16 @@
+{
+  "id": "sayedshaun/zipformer-tiny-bengali-eval",
+  "title": "Zipformer Tiny Bengali Eval",
+  "code_file": "kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["sajidullah03/common-voice-24-bn"],
+  "kernel_sources": ["sayedshaun/zipformer-tiny-bengali"],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
