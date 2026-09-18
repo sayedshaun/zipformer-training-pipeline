@@ -471,8 +471,8 @@ class BypassModule(nn.Module):
 
 class ZipformerBlock(nn.Module):
     """Module 9: one Zipformer block (ARCHITECTURE.md section 5).
-    Simplified to compute attention weights once per block (shared by NLA and
-    both MHSA calls) rather than the reference's twice-per-block split."""
+    Computes attention weights once per block, shared by NLA and both MHSA
+    calls, as the reference does."""
 
     def __init__(
         self,
@@ -484,6 +484,7 @@ class ZipformerBlock(nn.Module):
         ff_expansion_factor: int = 4,
         dropout: float = 0.1,
         bypass_min_scale: float = 0.4,
+        initial_scale: float = 0.05,
     ):
         super().__init__()
         self.attn_weights = AttentionWeights(d_model, n_heads, attn_head_dim, dropout)
@@ -496,6 +497,25 @@ class ZipformerBlock(nn.Module):
         self.conv2 = ConvolutionModule(d_model, conv_kernel_size, dropout)
         self.final_norm = BiasNorm(d_model)
         self.bypass = BypassModule(d_model, bypass_min_scale)
+
+        # Each block applies attention three times (NLA + two MHSA), and at
+        # init the softmax is near-uniform, so each one contributes roughly the
+        # mean over frames. Left at default init those 3*n_layers near-constant
+        # vectors swamp the residual stream: measured adjacent-frame cosine
+        # similarity 0.9999 at the encoder output against 0.91 at its input.
+        # Shrinking each branch's output projection starts every module close
+        # to identity, which is what the reference's ScaledLinear does.
+        for module, name in (
+            (self.nla, "out_proj"), (self.self_attn1, "linear_out"),
+            (self.self_attn2, "linear_out"), (self.ff1, "linear2"),
+            (self.ff2, "linear2"), (self.conv1, "pointwise_conv2"),
+            (self.conv2, "pointwise_conv2"),
+        ):
+            layer = getattr(module, name)
+            with torch.no_grad():
+                layer.weight.mul_(initial_scale)
+                if layer.bias is not None:
+                    layer.bias.mul_(initial_scale)
 
     def forward(self, x: torch.Tensor, pos_emb: torch.Tensor, padding_mask: torch.Tensor = None):
         residual = x
@@ -528,6 +548,7 @@ class ZipformerEncoder(nn.Module):
         ff_expansion_factor: int = 4,
         dropout: float = 0.1,
         bypass_min_scale: float = 0.4,
+        initial_scale: float = 0.05,
     ):
         super().__init__()
         self.subsampling = ConvSubsampling(d_model, n_mels)
@@ -537,6 +558,7 @@ class ZipformerEncoder(nn.Module):
                 ZipformerBlock(
                     d_model, n_heads, attn_head_dim, nla_hidden_dim,
                     conv_kernel_size, ff_expansion_factor, dropout, bypass_min_scale,
+                    initial_scale,
                 )
                 for _ in range(n_layers)
             ]
@@ -635,6 +657,7 @@ class ZipformerFromScratch(nn.Module):
         ff_expansion_factor: int = 4,
         dropout: float = 0.1,
         bypass_min_scale: float = 0.4,
+        initial_scale: float = 0.05,
         use_rnnt: bool = True,
         pred_dim: int = 320,
         joint_dim: int = 512,
@@ -652,6 +675,7 @@ class ZipformerFromScratch(nn.Module):
             ff_expansion_factor=ff_expansion_factor,
             dropout=dropout,
             bypass_min_scale=bypass_min_scale,
+            initial_scale=initial_scale,
         )
         self.ctc_head = CTCHead(d_model, vocab_size)
 
