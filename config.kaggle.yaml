@@ -42,9 +42,10 @@ model:
 
 train:
   loss: ctc
-  # Verification run: 2 epochs is enough to see whether sample decodes vary
-  # with the input at all. Raise back to 10 once the collapse is ruled out.
-  epochs: 2
+  # ~15-20 min/epoch measured across two T4s, so 20 epochs fits well inside
+  # the 12h session limit. Val loss was still falling steeply at epoch 1
+  # (5.37 -> 2.78), so the extra epochs are worth more than the time saved.
+  epochs: 20
   # Per GPU. With 2 T4s under torchrun the effective batch is 2x this.
   batch_size: 8
   # Kaggle gives ~4 vCPU; MP3 decode + resample happens in these workers, so
