@@ -306,6 +306,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         epoch_start = time.time()
         running_loss = 0.0
+        skipped_steps, total_steps = 0, 0
         # Without set_epoch every epoch replays the same shuffle and the same
         # rank -> utterance assignment.
         if distributed:
@@ -318,10 +319,18 @@ def main():
             loss = compute_loss(model, batch, args.loss, device, amp_dtype)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), args.grad_clip)
+            grad_norm = clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+
+            # A non-finite gradient makes scaler.step() silently skip the update
+            # while scheduler.step() still advances, which looks exactly like a
+            # plateau. Without this count there is no way to tell a model that
+            # has converged from one that is barely being updated.
+            if not torch.isfinite(grad_norm):
+                skipped_steps += 1
+            total_steps += 1
 
             running_loss += loss.item()
             lr = optimizer.param_groups[0]["lr"]
@@ -329,8 +338,15 @@ def main():
 
             if is_main and (batch_idx + 1) % args.log_interval == 0:
                 avg_loss = running_loss / args.log_interval
+                skip_frac = skipped_steps / max(total_steps, 1)
                 if run is not None:
-                    run.log({"train/loss": avg_loss, "train/lr": lr, "epoch": epoch}, step=step)
+                    run.log({"train/loss": avg_loss, "train/lr": lr,
+                             "train/skipped_step_frac": skip_frac, "epoch": epoch}, step=step)
+                if skip_frac > 0.05:
+                    tqdm.write(
+                        f"  [warn] {skip_frac:.1%} of steps skipped on non-finite grads "
+                        f"(scale {scaler.get_scale():.0f}) - fp16 overflow"
+                    )
                 running_loss = 0.0
 
             # Epoch boundaries are hours apart on a full corpus, so without this
@@ -350,7 +366,11 @@ def main():
         val_loss = evaluate(model, val_loader, args.loss, device, amp_dtype, is_main)
         elapsed = time.time() - epoch_start
         if is_main:
-            print(f"epoch {epoch} done in {elapsed:.1f}s -- val_loss {val_loss:.4f}")
+            skip_frac = skipped_steps / max(total_steps, 1)
+            print(
+                f"epoch {epoch} done in {elapsed:.1f}s -- val_loss {val_loss:.4f} "
+                f"-- skipped {skipped_steps}/{total_steps} steps ({skip_frac:.1%})"
+            )
             if run is not None:
                 run.log({"val/loss": val_loss, "epoch": epoch}, step=step)
 
