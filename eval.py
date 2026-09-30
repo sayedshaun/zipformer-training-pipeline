@@ -40,6 +40,24 @@ def greedy_ctc_decode(log_probs: torch.Tensor, lengths: torch.Tensor, blank_id: 
     return hypotheses
 
 
+RNNT_PREFIXES = ("prediction_network.", "joint_network.")
+
+
+def checkpoint_uses_rnnt(state_dict: dict) -> bool:
+    return any(key.startswith(RNNT_PREFIXES) for key in state_dict)
+
+
+def decode_batch(model, waveforms: torch.Tensor, waveform_lengths: torch.Tensor, tokenizer) -> list:
+    """Greedy-decodes a batch with the RNNT head when the model has one, else
+    the CTC head. An RNNT model still carries a CTC head, but once the encoder
+    trains under the RNNT loss alone that head goes stale, so it is not used."""
+    if model.use_rnnt:
+        encoder_out, encoded_lengths = model.encode(waveforms, waveform_lengths)
+        return [tokenizer.decode(ids) for ids in model.greedy_rnnt(encoder_out, encoded_lengths)]
+    log_probs, encoded_lengths = model.forward_ctc(waveforms, waveform_lengths)
+    return greedy_ctc_decode(log_probs, encoded_lengths, model.ctc_head.blank_id, tokenizer)
+
+
 def edit_distance(ref: list, hyp: list) -> int:
     """Levenshtein distance between two token sequences."""
     prev = list(range(len(hyp) + 1))
@@ -81,10 +99,15 @@ def main():
     tokenizer = BPETokenizer.load(str(vocab_path))
     loader = build_dataloader(
         args.manifest, tokenizer, args.batch_size, shuffle=False, num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
     )
 
     with open(args.manifest) as f:
         references = [json.loads(line)["text"] for line in f if line.strip()]
+
+    ckpt = torch.load(model_path, map_location=device)
+    state_dict = ckpt["model_state_dict"]
+    use_rnnt = checkpoint_uses_rnnt(state_dict)
 
     model = ZipformerFromScratch(
         vocab_size=tokenizer.vocab_size,
@@ -96,34 +119,23 @@ def main():
         conv_kernel_size=args.conv_kernel_size,
         ff_expansion_factor=args.ff_expansion_factor,
         bypass_min_scale=args.bypass_min_scale,
-        use_rnnt=False,
+        use_rnnt=use_rnnt,
     ).to(device)
-
-    ckpt = torch.load(model_path, map_location=device)
-    # The RNNT branch is built only when training with `loss: rnnt`, and eval
-    # decodes via CTC either way - so drop those keys and then load *strictly*,
-    # so a config that no longer matches the checkpoint (wrong d_model,
+    # Strict, so a config that no longer matches the checkpoint (wrong d_model,
     # n_layers, vocab size, ...) fails loudly instead of silently evaluating a
     # partly-randomly-initialised model.
-    state_dict = {
-        key: value
-        for key, value in ckpt["model_state_dict"].items()
-        if not key.startswith(("prediction_network.", "joint_network."))
-    }
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     hypotheses = []
     for waveforms, waveform_lengths, _, _ in loader:
-        waveforms = waveforms.to(device)
-        waveform_lengths = waveform_lengths.to(device)
-        log_probs, encoded_lengths = model.forward_ctc(waveforms, waveform_lengths)
         hypotheses.extend(
-            greedy_ctc_decode(log_probs, encoded_lengths, model.ctc_head.blank_id, tokenizer)
+            decode_batch(model, waveforms.to(device), waveform_lengths.to(device), tokenizer)
         )
 
     wer = corpus_error_rate(references, hypotheses, level="word")
     cer = corpus_error_rate(references, hypotheses, level="char")
+    print(f"Decoder: {'rnnt' if use_rnnt else 'ctc'} (greedy)")
     print(f"Utterances: {len(hypotheses)}")
     print(f"WER: {wer * 100:.2f}%")
     print(f"CER: {cer * 100:.2f}%")
