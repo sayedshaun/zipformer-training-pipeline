@@ -7,8 +7,8 @@ per frame call decoder+joiner in a loop, advancing the decoder state only on
 a non-blank emission.
 
 Usage:
-    python export_onnx.py --config config.rtx5080.rnnt.yaml \
-        --model zipformer_bn_rtx5080_rnnt/rnnt_final_epoch28.pt \
+    python export_onnx.py --config config.yaml \
+        --model zipformer_bn/rnnt_final_epoch28.pt \
         --out onnx_export
 """
 
@@ -24,7 +24,7 @@ from tokenizer import BPETokenizer
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="config.rtx5080.rnnt.yaml")
+    parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", default="onnx_export")
     parser.add_argument("--opset", type=int, default=17)
