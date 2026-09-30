@@ -615,6 +615,11 @@ class RNNTPredictionNetwork(nn.Module):
         embedded = self.embedding(prepended)
         return self.lstm(embedded, states)
 
+    def step(self, tokens: torch.Tensor, states=None):
+        """One decoding step. tokens: (B, 1), fed as-is (no blank prepended) -
+        the caller starts from the blank token, matching forward()'s prefix."""
+        return self.lstm(self.embedding(tokens), states)
+
 
 class RNNTJoint(nn.Module):
     """Module 12b: RNNT joint network - unchanged from the FastConformer reference."""
@@ -630,12 +635,14 @@ class RNNTJoint(nn.Module):
         """
         encoder_out: (B, T, encoder_dim)
         pred_out: (B, U, pred_dim)
-        Returns log-probs (B, T, U, vocab_size + 1).
+        Returns raw logits (B, T, U, vocab_size + 1), not log-probs: this tensor
+        is by far the largest in RNNT training, and letting rnnt_loss fuse the
+        log-softmax avoids materialising a second full-size copy of it.
         """
         enc = self.enc_proj(encoder_out).unsqueeze(2)  # (B, T, 1, joint_dim)
         pred = self.pred_proj(pred_out).unsqueeze(1)  # (B, 1, U, joint_dim)
         joint = self.activation(enc + pred)  # (B, T, U, joint_dim)
-        return torch.log_softmax(self.out(joint), dim=-1)
+        return self.out(joint)
 
 
 class ZipformerFromScratch(nn.Module):
@@ -708,10 +715,50 @@ class ZipformerFromScratch(nn.Module):
 
     def forward_rnnt(self, waveform: torch.Tensor, waveform_lengths: torch.Tensor, targets: torch.Tensor):
         """targets: (B, U) target token ids (no blank), teacher-forced.
-        Returns (joint_log_probs (B, T', U + 1, vocab_size + 1), encoded_lengths)."""
+        Returns (joint_logits (B, T', U + 1, vocab_size + 1), encoded_lengths) -
+        raw logits, for rnnt_loss(fused_log_softmax=True)."""
         if not self.use_rnnt:
             raise RuntimeError("Model was built with use_rnnt=False")
         encoder_out, encoded_lengths = self.encode(waveform, waveform_lengths)
         pred_out, _ = self.prediction_network(targets)
         joint_out = self.joint_network(encoder_out, pred_out)
         return joint_out, encoded_lengths
+
+    @torch.no_grad()
+    def greedy_rnnt(self, encoder_out: torch.Tensor, encoded_lengths: torch.Tensor, max_symbols_per_frame: int = 5):
+        """Batched greedy RNNT decode. Returns one list of token ids per utterance.
+
+        Each frame may emit up to max_symbols_per_frame tokens before moving on;
+        the cap stops an untrained or diverged joint from looping forever on
+        one frame. Only utterances that emitted a token advance their
+        prediction-network state, so the batch stays in lockstep over frames.
+        """
+        if not self.use_rnnt:
+            raise RuntimeError("Model was built with use_rnnt=False")
+        pred_net, joint = self.prediction_network, self.joint_network
+        batch, frames, _ = encoder_out.shape
+        blank = pred_net.blank_id
+
+        enc_proj = joint.enc_proj(encoder_out)
+        tokens = torch.full((batch, 1), blank, dtype=torch.long, device=encoder_out.device)
+        pred_out, (h, c) = pred_net.step(tokens)
+        pred_proj = joint.pred_proj(pred_out[:, 0])
+
+        hyps = [[] for _ in range(batch)]
+        for t in range(frames):
+            active = encoded_lengths > t
+            for _ in range(max_symbols_per_frame):
+                logits = joint.out(joint.activation(enc_proj[:, t] + pred_proj))
+                best = logits.argmax(dim=-1)
+                emit = active & (best != blank)
+                if not emit.any():
+                    break
+                for b in emit.nonzero().flatten().tolist():
+                    hyps[b].append(best[b].item())
+                new_out, (new_h, new_c) = pred_net.step(best.unsqueeze(1), (h, c))
+                mask = emit.view(1, batch, 1)
+                h = torch.where(mask, new_h, h)
+                c = torch.where(mask, new_c, c)
+                pred_proj = torch.where(emit.unsqueeze(1), joint.pred_proj(new_out[:, 0]), pred_proj)
+                active = emit
+        return hyps
