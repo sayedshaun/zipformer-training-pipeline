@@ -13,7 +13,7 @@
 #     model size and a conservative batch size rather than config.yaml's
 #     full-size defaults, to stay clear of OOM.
 #   - precision is bf16: RTX 5080 is Blackwell (sm_120) and has full bf16
-#     support, unlike the T4s the old Kaggle config targeted.
+#     support, unlike the T4s the previous config targeted.
 
 manifests:
   train_manifest: /home/user/shaun/conformer-training-pipeline/data/train_manifest.json

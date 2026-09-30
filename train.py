@@ -233,7 +233,7 @@ def main():
     if is_main:
         print(f"World size: {world_size} | device: {device}")
 
-    # ZIPFORMER_WANDB lets the Kaggle kernel enable wandb only when its secret
+    # ZIPFORMER_WANDB lets a runtime enable wandb only when its secret
     # actually resolved, without writing a key into the committed config.
     wandb_enabled = wandb_args.wandb_enabled
     env_wandb = os.environ.get("ZIPFORMER_WANDB")
@@ -438,8 +438,8 @@ def main():
                 )
                 print(f"New best val_loss {best_val_loss:.4f}, saved {best_path}")
                 # Upload it so the weights are retrievable while the run is still
-                # going - the whole point on Kaggle, where /kaggle/working stays
-                # sealed until the kernel exits.
+                # going, on a host where the output directory stays sealed until
+                # the process exits.
                 if run is not None:
                     import wandb
 

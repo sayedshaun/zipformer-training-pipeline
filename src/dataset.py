@@ -41,9 +41,9 @@ class ManifestDataset(Dataset):
             waveform = waveform.mean(axis=1)
 
         if sr != self.sample_rate:
-            # Common Voice ships 32kHz MP3 and the corpus is mounted read-only on
-            # Kaggle, so there is nowhere to write a resampled copy - resample per
-            # item instead of pre-converting the way src/audio.py does.
+            # Common Voice ships 32kHz MP3 and the corpus is mounted read-only,
+            # so there is nowhere to write a resampled copy - resample per item
+            # instead of pre-converting the way src/audio.py does.
             # soxr rather than torchaudio: torchaudio is frozen at 2.11 and has no
             # build for newer torch, so depending on it here would pin the repo's
             # torch version for what is a few lines of signal processing.

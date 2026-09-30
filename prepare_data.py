@@ -29,7 +29,7 @@ load_dotenv()
 PREPARERS = {
     "mcv": prepare_mcv_dataset,
     "openslr": prepare_openslr_dataset,
-    # An already-extracted Common Voice tree (e.g. a read-only Kaggle mount).
+    # An already-extracted Common Voice tree (e.g. a read-only mount).
     "commonvoice": prepare_commonvoice_dataset,
 }
 SPLITS = ("train", "dev", "test")

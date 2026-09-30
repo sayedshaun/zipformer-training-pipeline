@@ -2,7 +2,7 @@
 
 Unlike src/mcv.py (which downloads from the Mozilla Data Collective API and
 transcodes every clip to 16kHz wav), this module assumes the corpus is *mounted
-read-only* - the Kaggle dataset case - so it never downloads and never writes
+read-only* - a mounted dataset case - so it never downloads and never writes
 audio. Manifests point straight at the mounted MP3s, and src/dataset.py
 resamples them per item.
 
