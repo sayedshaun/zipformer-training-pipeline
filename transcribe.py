@@ -20,7 +20,7 @@ import soundfile as sf
 import soxr
 import torch
 
-from eval import corpus_error_rate, greedy_ctc_decode
+from eval import checkpoint_uses_rnnt, corpus_error_rate, decode_batch
 from src.config import load_sections
 from src.model import ZipformerFromScratch
 from tokenizer import BPETokenizer
@@ -71,6 +71,9 @@ def main():
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     tokenizer = BPETokenizer.load(str(tokenizer_path))
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    use_rnnt = checkpoint_uses_rnnt(state_dict)
 
     model = ZipformerFromScratch(
         vocab_size=tokenizer.vocab_size,
@@ -83,16 +86,12 @@ def main():
         ff_expansion_factor=model_args.ff_expansion_factor,
         dropout=model_args.dropout,
         bypass_min_scale=model_args.bypass_min_scale,
-        use_rnnt=False,
+        use_rnnt=use_rnnt,
     )
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    # The RNNT branch is absent when the checkpoint was trained with --loss ctc.
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        print(f"warning: {len(missing)} missing keys, first few: {missing[:3]}")
+    model.load_state_dict(state_dict, strict=True)
     model.to(device).eval()
-    print(f"Loaded {model_path} (epoch {checkpoint.get('epoch', '?')}, step {checkpoint.get('step', '?')})")
+    print(f"Loaded {model_path} (epoch {checkpoint.get('epoch', '?')}, step {checkpoint.get('step', '?')}, "
+          f"decoder {'rnnt' if use_rnnt else 'ctc'})")
 
     waveform, duration = load_audio(args.audio)
     chunks = chunk_waveform(waveform, args.chunk_seconds, args.overlap_seconds)
@@ -103,10 +102,7 @@ def main():
         for i, chunk in enumerate(chunks, 1):
             batch = chunk.unsqueeze(0).to(device)
             lengths = torch.tensor([chunk.numel()], device=device)
-            log_probs, encoded_lengths = model.forward_ctc(batch, lengths)
-            text = greedy_ctc_decode(
-                log_probs, encoded_lengths, model.ctc_head.blank_id, tokenizer
-            )[0]
+            text = decode_batch(model, batch, lengths, tokenizer)[0]
             print(f"  [{i}/{len(chunks)}] {text}")
             pieces.append(text)
 
