@@ -121,16 +121,20 @@ def compute_loss(model, batch, loss_type: str, device, amp_dtype=None):
     import torchaudio
 
     with autocast_ctx:
-        joint_log_probs, encoded_lengths = model(waveforms, waveform_lengths, targets)
+        joint_logits, encoded_lengths = model(waveforms, waveform_lengths, targets)
+    joint_logits = joint_logits.float()
     loss = torchaudio.functional.rnnt_loss(
-        joint_log_probs.float(),
+        joint_logits,
         targets.int(),
         encoded_lengths.int(),
         target_lengths.int(),
         blank=unwrap(model).prediction_network.blank_id,
-        fused_log_softmax=False,
+        fused_log_softmax=True,
+        reduction="sum",
     )
-    return loss
+    # Per target token: rnnt_loss's per-utterance sum grows with length, and
+    # length-budgeted batches make batch composition track length.
+    return loss / target_lengths.sum()
 
 
 @torch.no_grad()
@@ -144,13 +148,16 @@ def log_sample_transcription(model, batch, tokenizer, device):
     model.eval()
     waveform = waveforms[idx : idx + 1].to(device)
     waveform_length = waveform_lengths[idx : idx + 1].to(device)
-    log_probs, encoded_lengths = inner.forward_ctc(waveform, waveform_length)
+    if inner.use_rnnt:
+        encoder_out, encoded_lengths = inner.encode(waveform, waveform_length)
+        pred_text = tokenizer.decode(inner.greedy_rnnt(encoder_out, encoded_lengths)[0])
+    else:
+        log_probs, encoded_lengths = inner.forward_ctc(waveform, waveform_length)
+        predicted_ids = log_probs[0, : encoded_lengths[0].item()].argmax(dim=-1).tolist()
+        collapsed = [token for token, _ in groupby(predicted_ids)]
+        collapsed = [token for token in collapsed if token != inner.ctc_head.blank_id]
+        pred_text = tokenizer.decode(collapsed)
     model.train()
-
-    predicted_ids = log_probs[0, : encoded_lengths[0].item()].argmax(dim=-1).tolist()
-    collapsed = [token for token, _ in groupby(predicted_ids)]
-    collapsed = [token for token in collapsed if token != inner.ctc_head.blank_id]
-    pred_text = tokenizer.decode(collapsed)
 
     true_ids = targets[idx][: target_lengths[idx].item()].tolist()
     true_text = tokenizer.decode(true_ids)
@@ -264,13 +271,19 @@ def main():
     if is_main:
         print(f"Vocab size: {tokenizer.vocab_size} ({vocab_path})")
 
+    budgets = dict(
+        max_batch_seconds=getattr(args, "max_batch_seconds", None),
+        max_joint_cells=getattr(args, "max_joint_cells", None),
+    )
     train_loader = build_dataloader(
         args.train_manifest, tokenizer, args.batch_size, shuffle=True,
         num_workers=args.num_workers, distributed=distributed,
+        pin_memory=(device.type == "cuda"), **budgets,
     )
     val_loader = build_dataloader(
         args.val_manifest, tokenizer, args.batch_size, shuffle=False,
         num_workers=args.num_workers, distributed=distributed,
+        pin_memory=(device.type == "cuda"), **budgets,
     )
 
     model = build_model(args, tokenizer.vocab_size).to(device)
@@ -279,9 +292,24 @@ def main():
             model,
             device_ids=[local_rank] if torch.cuda.is_available() else None,
         )
-    # Parameters must come from the DDP wrapper so the optimizer updates the
-    # same tensors the reducer writes gradients into.
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # The optimizer must hold the same tensors the DDP reducer writes gradients
+    # into; unwrap(model)'s parameters are those same objects.
+    head_lr_mult = getattr(args, "head_lr_mult", None)
+    if head_lr_mult:
+        # A trained encoder warm-started under freshly initialised RNNT heads:
+        # at one shared LR the heads learn too slowly (the prediction network's
+        # signal starts ~18x weaker than the encoder's in the joint, so the
+        # model sits on all-blank output), or the encoder gets shaken. Grouping
+        # is by config, not init_from, so a later resume sees the same groups.
+        heads = ("prediction_network.", "joint_network.")
+        named = list(unwrap(model).named_parameters())
+        params = [
+            {"params": [p for n, p in named if not n.startswith(heads)], "lr": args.lr},
+            {"params": [p for n, p in named if n.startswith(heads)], "lr": args.lr * head_lr_mult},
+        ]
+    else:
+        params = model.parameters()
+    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: warmup_decay_scale(step, args.warmup_steps)
     )
@@ -291,6 +319,24 @@ def main():
     print(f"Precision: {args.precision}")
 
     start_epoch, step, best_val_loss = 0, 0, float("inf")
+    init_from = getattr(args, "init_from", None)
+    if init_from and args.resume_from:
+        raise SystemExit("Set train.init_from or train.resume_from, not both")
+    if init_from:
+        # Weights only: switching the loss (e.g. CTC -> RNNT) adds modules the
+        # source checkpoint has no weights for, and its optimizer/scheduler
+        # state belongs to a different parameter set and LR schedule.
+        ckpt = torch.load(init_from, map_location=device)
+        missing, unexpected = unwrap(model).load_state_dict(ckpt["model_state_dict"], strict=False)
+        new_modules = ("prediction_network.", "joint_network.")
+        stray = [key for key in missing if not key.startswith(new_modules)]
+        if stray or unexpected:
+            raise SystemExit(
+                f"{init_from} does not match this model config - "
+                f"missing: {stray[:5]}, unexpected: {unexpected[:5]}"
+            )
+        fresh = sorted({key.split(".")[0] for key in missing})
+        print(f"Initialised from {init_from}; freshly initialised: {fresh or 'nothing'}")
     if args.resume_from:
         ckpt = torch.load(args.resume_from, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -311,6 +357,8 @@ def main():
         # rank -> utterance assignment.
         if distributed:
             train_loader.sampler.set_epoch(epoch)
+        elif hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(epoch)
         pbar = tqdm(train_loader, desc=f"epoch {epoch}", disable=not is_main)
         for batch_idx, batch in enumerate(pbar):
             step += 1
@@ -360,7 +408,7 @@ def main():
                 )
                 tqdm.write(f"  [checkpoint] step {step} -> {output_dir / 'last.pt'}")
 
-            if is_main and args.loss == "ctc" and step % args.transcribe_interval == 0:
+            if is_main and step % args.transcribe_interval == 0:
                 log_sample_transcription(model, batch, tokenizer, device)
 
         val_loss = evaluate(model, val_loader, args.loss, device, amp_dtype, is_main)
